@@ -1,3 +1,7 @@
+This repository add some changes to enable control and datapath energy analysis.
+
+OLD GPU-BENCHES README
+
 # GPU benchmarks
 This is a collection of GPU micro benchmarks. Each test is designed to test a particular scenario or hardware mechanism. Some of the benchmarks have been used to produce data for these papers:
 
