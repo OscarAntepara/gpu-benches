@@ -1,4 +1,11 @@
 This repository add some changes to enable control and datapath energy analysis.
+For NVIDIA GPUs, load nvhpc or the nvidia libraries. For AMD GPUs, load rocm and compilation will use hipify to build the exectuable.
+Addtionally, gpu-cache and gpu-l2-cache will require arguments as follows:
+
+* Test requires two args. 
+* First arg (0/1) ==> zero/random data 
+* Second arg (0/1) ==> original implementation/running longer for power measurement
+
 
 OLD GPU-BENCHES README
 
