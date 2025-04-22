@@ -1,13 +1,13 @@
 #include "../MeasurementSeries.hpp"
 #include "../dtime.hpp"
 #include "../gpu-error.h"
-#include "../gpu-metrics/gpu-metrics.hpp"
+//#include "../gpu-metrics/gpu-metrics.hpp"
 #include <iomanip>
 #include <iostream>
 
 using namespace std;
 
-using dtype = double;
+using dtype = float;
 dtype *dA, *dB;
 
 __global__ void initKernel(dtype *A, size_t N) {
@@ -35,11 +35,11 @@ __global__ void sumKernel(dtype *__restrict__ A, const dtype *__restrict__ B,
 }
 template <int N, int blockSize>
 double callKernel(int blockCount, int blockRun) {
-  sumKernel<N, blockSize><<<blockCount, blockSize>>>(dA, dB, blockRun);
+  sumKernel<N, blockSize><<<blockCount, blockSize>>>((dtype*)dA, (dtype*)dB, blockRun);
   GPU_ERROR(cudaPeekAtLastError());
   return 0.0;
 }
-template <int N> void measure(int blockRun) {
+template <int N> void measure(int blockRun, int random, int run_long) {
 
   const int blockSize = 1024;
 
@@ -63,20 +63,38 @@ template <int N> void measure(int blockRun) {
   MeasurementSeries L2_read;
   MeasurementSeries L2_write;
 
+  double* c;
+  c = (double*)malloc(sizeof(double)*(blockRun * blockSize * N ));
+  #pragma omp parallel for
+  for (int i = 0; i < (blockRun * blockSize * N ) ; i++) {
+    if (random) c[i] = 1.0 + ( (double)(rand()) / (double)(RAND_MAX) );
+    else c[i] = 0.0;
+  }
+ 
   GPU_ERROR(cudaDeviceSynchronize());
-  for (int i = 0; i < 11; i++) {
+  for (int i = 0; i < 1; i++) {
     const size_t bufferCount = blockRun * blockSize * N + i * 128;
     GPU_ERROR(cudaMalloc(&dA, bufferCount * sizeof(dtype)));
-    initKernel<<<52, 256>>>(dA, bufferCount);
+    GPU_ERROR( cudaMemset(dA, 0, bufferCount*sizeof(dtype)) );  // initialize to zeros
+    GPU_ERROR( cudaMemcpy(dA, c, bufferCount*sizeof(dtype), cudaMemcpyHostToDevice) );
+    //initKernel<<<52, 256>>>(dA, bufferCount);
     GPU_ERROR(cudaMalloc(&dB, bufferCount * sizeof(dtype)));
-    initKernel<<<52, 256>>>(dB, bufferCount);
+    GPU_ERROR( cudaMemset(dB, 0, bufferCount*sizeof(dtype)) );  // initialize to zeros
+    GPU_ERROR( cudaMemcpy(dB, c, bufferCount*sizeof(dtype), cudaMemcpyHostToDevice) );
+    //initKernel<<<52, 256>>>(dB, bufferCount);
     GPU_ERROR(cudaDeviceSynchronize());
 
+    int iter=1000;
+    if ((N * blockSize * sizeof(dtype)) * blockRun / 1024 > 40000) iter=900;
+    if (!run_long) iter=1;
+
     double t1 = dtime();
-    callKernel<N, blockSize>(blockCount, blockRun);
+    for (int ii = 0; ii < iter; ii++) {
+      callKernel<N, blockSize>(blockCount, blockRun);
+    }
     GPU_ERROR(cudaDeviceSynchronize());
     double t2 = dtime();
-    time.add(t2 - t1);
+    time.add((t2 - t1)/iter);
 
     /* measureDRAMBytesStart();
      callKernel<N, blockSize>(blockCount, blockRun);
@@ -121,17 +139,35 @@ size_t constexpr expSeries(size_t N) {
 }
 
 int main(int argc, char **argv) {
-  initMeasureMetric();
+  //initMeasureMetric();
+  int random=0;
+  int run_long=0;
+  if (argc!=3 || std::atoi(argv[1])>1 || std::atoi(argv[1])<0 || std::atoi(argv[2])>1 || std::atoi(argv[2])<0) {
+    std::cout << "Test requires two args. "<< std::endl;
+    std::cout << "First arg (0/1) ==> zero/random data "<< std::endl;
+    std::cout << "Second arg (0/1) ==> orig/running longer for power measurement "<< std::endl;
+    exit (0);
+  }
+  for (int i = 1; i < argc; ++i) {
+    if (i==1 && std::atoi(argv[i])==1) random=1;
+    if (i==2 && std::atoi(argv[i])==1) run_long=1;
+  }
+  std::cout << "Test with ";
+  if (random) std::cout <<"random data. ";
+  else std::cout <<"zero data. ";
+  std::cout <<std::endl;
+  if (run_long) std::cout <<"Power profile mode."<<std::endl;
+
   cout << setw(13) << "data set"   //
        << setw(12) << "exec time"  //
        << setw(11) << "spread"     //
        << setw(15) << "Eff. bw\n"; //
 
-  for (int i = 3; i < 10000; i += max(1.0, i * 0.1)) {
+  for (int i = 3; i < 1000; i += 4*max(1.0, i * 0.1)) {
 #ifdef __NVCC__
-    measure<64>(i);
+    measure<128>(i, random, run_long);
 #else
-    measure<64>(i);
+    measure<128>(i, random, run_long);
 #endif
   }
 }

@@ -2,7 +2,7 @@
 #include "../dtime.hpp"
 #include "../gpu-clock.cuh"
 #include "../gpu-error.h"
-#include "../gpu-metrics/gpu-metrics.hpp"
+//#include "../gpu-metrics/gpu-metrics.hpp"
 
 #include <iomanip>
 #include <iostream>
@@ -34,10 +34,10 @@ __global__ void sumKernel(dtype *__restrict__ A, const dtype *__restrict__ B,
 #pragma unroll N / BLOCKSIZE> 32   ? 1 : 32 / (N / BLOCKSIZE)
   for (int iter = 0; iter < iters; iter++) {
     B += zero;
-    auto B2 = B + N;
+    //auto B2 = B + N;
 #pragma unroll N / BLOCKSIZE >= 64 ? 32 : N / BLOCKSIZE
     for (int i = 0; i < N; i += BLOCKSIZE) {
-      localSum += B[i] * B2[i];
+      localSum += B[i];
     }
     localSum *= (dtype)1.3;
   }
@@ -50,8 +50,10 @@ template <int N, int iters, int blockSize> double callKernel(int blockCount) {
   return 0.0;
 }
 
-template <int N, int blockSize> void measure() {
+template <int N> void measure(int random, int run_long) {
   const size_t iters = (size_t)1000000000 / N + 2;
+
+  const int blockSize = 256;
 
   cudaDeviceProp prop;
   int deviceId;
@@ -71,50 +73,55 @@ template <int N, int blockSize> void measure() {
   MeasurementSeries L2_read;
   MeasurementSeries L2_write;
 
+    dtype* c;
+    c = (dtype*)malloc(sizeof(dtype)*(N ));
+    #pragma omp parallel for
+    for (int i = 0; i < N  ; i++) {
+      if (random) c[i] = 1.0 + ( (dtype)(rand()) / (dtype)(RAND_MAX) );
+      else c[i]=0.0;
+    }
+
   GPU_ERROR(cudaDeviceSynchronize());
 
-  cudaEvent_t start, stop;
-  GPU_ERROR(cudaEventCreate(&start));
-  GPU_ERROR(cudaEventCreate(&stop));
-
-  for (int i = 0; i < 15; i++) {
-    const size_t bufferCount = 2 * N + i * 1282;
+  for (int i = 0; i < 1; i++) {
+    const size_t bufferCount = N; // + i * 1282;
     GPU_ERROR(cudaMalloc(&dA, bufferCount * sizeof(dtype)));
-    initKernel<<<52, 256>>>(dA, bufferCount);
+    GPU_ERROR( cudaMemset(dA, 0, bufferCount*sizeof(dtype)) );  // initialize to zeros
+    GPU_ERROR( cudaMemcpy(dA, c, bufferCount*sizeof(dtype), cudaMemcpyHostToDevice) );
+    //initKernel<<<52, 256>>>(dA, bufferCount);
     GPU_ERROR(cudaMalloc(&dB, bufferCount * sizeof(dtype)));
-    initKernel<<<52, 256>>>(dB, bufferCount);
-
-    dA += i;
-    dB += i;
-
+    GPU_ERROR( cudaMemset(dB, 0, bufferCount*sizeof(dtype)) );  // initialize to zeros
+    GPU_ERROR( cudaMemcpy(dB, c, bufferCount*sizeof(dtype), cudaMemcpyHostToDevice) );
+    //initKernel<<<52, 256>>>(dB, bufferCount);
     GPU_ERROR(cudaDeviceSynchronize());
 
-    GPU_ERROR(cudaEventRecord(start));
+    int iter=900;
+    if (!run_long) iter =1;
+ 
+    double t1 = dtime();
+    for (int ii = 0; ii < iter; ii++) {
+      callKernel<N, iters, blockSize>(blockCount);
+    }
+    GPU_ERROR(cudaDeviceSynchronize());
+    double t2 = dtime();
+    time.add((t2 - t1)/iter);
+    /*
+    measureDRAMBytesStart();
     callKernel<N, iters, blockSize>(blockCount);
-    GPU_ERROR(cudaEventRecord(stop));
+    auto metrics = measureDRAMBytesStop();
+    dram_read.add(metrics[0]);
+    dram_write.add(metrics[1]);
 
-    GPU_ERROR(cudaEventSynchronize(stop));
-    float milliseconds = 0;
-    GPU_ERROR(cudaEventElapsedTime(&milliseconds, start, stop));
-    time.add(milliseconds / 1000);
-
-    /*    measureDRAMBytesStart();
-        callKernel<N, iters, blockSize>(blockCount);
-        auto metrics = measureDRAMBytesStop();
-        dram_read.add(metrics[0]);
-        dram_write.add(metrics[1]);
-
-        measureL2BytesStart();
-        callKernel<N, iters, blockSize>(blockCount);
-        metrics = measureL2BytesStop();
-        L2_read.add(metrics[0]);
-        L2_write.add(metrics[1]);
+    measureL2BytesStart();
+    callKernel<N, iters, blockSize>(blockCount);
+    metrics = measureL2BytesStop();
+    L2_read.add(metrics[0]);
+    L2_write.add(metrics[1]);
     */
-
-    GPU_ERROR(cudaFree(dA - i));
-    GPU_ERROR(cudaFree(dB - i));
+    GPU_ERROR(cudaFree(dA));
+    GPU_ERROR(cudaFree(dB));
   }
-  double blockDV = 2 * N * sizeof(dtype);
+  double blockDV = N * sizeof(dtype);
 
   double bw = blockDV * blockCount * iters / time.minValue() / 1.0e9;
   cout << fixed << setprecision(0) << setw(10) << blockDV / 1024 << " kB" //
@@ -140,8 +147,26 @@ size_t constexpr expSeries(size_t N) {
 }
 
 int main(int argc, char **argv) {
-  initMeasureMetric();
-  // unsigned int clock = getGPUClock();
+  //initMeasureMetric();
+  int random=0;
+  int run_long=0;
+  if (argc!=3 || std::atoi(argv[1])>1 || std::atoi(argv[1])<0 || std::atoi(argv[2])>1 || std::atoi(argv[2])<0) {
+    std::cout << "Test requires two args. "<< std::endl;
+    std::cout << "First arg (0/1) ==> zero/random data "<< std::endl;
+    std::cout << "Second arg (0/1) ==> orig/running longer for power measurement "<< std::endl;
+    exit (0);
+  }
+  for (int i = 1; i < argc; ++i) {
+    if (i==1 && std::atoi(argv[i])==1) random=1;
+    if (i==2 && std::atoi(argv[i])==1) run_long=1;
+  }
+  std::cout << "Test with ";
+  if (random) std::cout <<"random data. ";
+  else std::cout <<"zero data. ";
+  std::cout <<std::endl;
+  if (run_long) std::cout <<"Power profile mode."<<std::endl;
+
+  unsigned int clock = getGPUClock();
   cout << setw(13) << "data set"   //
        << setw(12) << "exec time"  //
        << setw(11) << "spread"     //
@@ -151,90 +176,25 @@ int main(int argc, char **argv) {
        << setw(16) << "L2 read"    //
        << setw(16) << "L2 store\n";
 
-  initMeasureMetric();
+  //initMeasureMetric();
 
-  measure<128, 128>();
-  measure<256, 256>();
-  measure<512, 512>();
-  measure<3 * 256, 256>();
-  measure<2 * 512, 512>();
-  measure<3 * 512, 512>();
-  measure<4 * 512, 512>();
-  measure<5 * 512, 512>();
-  measure<6 * 512, 512>();
-  measure<7 * 512, 512>();
-  measure<8 * 512, 512>();
-  measure<9 * 512, 512>();
-  measure<10 * 512, 512>();
-  measure<11 * 512, 512>();
-  measure<12 * 512, 512>();
-  measure<13 * 512, 512>();
-  measure<14 * 512, 512>();
-  measure<15 * 512, 512>();
-  measure<16 * 512, 512>();
-  measure<17 * 512, 512>();
-  measure<18 * 512, 512>();
-  measure<19 * 512, 512>();
-  measure<20 * 512, 512>();
-  measure<21 * 512, 512>();
-  measure<22 * 512, 512>();
-  measure<23 * 512, 512>();
-  measure<24 * 512, 512>();
-  measure<25 * 512, 512>();
-  measure<26 * 512, 512>();
-  measure<27 * 512, 512>();
-  measure<28 * 512, 512>();
-  measure<29 * 512, 512>();
-  measure<30 * 512, 512>();
-  measure<31 * 512, 512>();
-  measure<32 * 512, 512>();
+  const int ct = 1;
+  measure<ct*256>(random, run_long);
+  measure<ct*512>(random, run_long);
+  measure<ct*3 * 256>(random, run_long);
+  measure<ct*5 * 512>(random, run_long);
+  measure<ct*9 * 512>(random, run_long);
+  measure<ct*13 * 512>(random, run_long);
+  measure<ct*17 * 512>(random, run_long);
+  measure<ct*21 * 512>(random, run_long);
+  measure<ct*25 * 512>(random, run_long);
+  measure<ct*29 * 512>(random, run_long);
 
-  measure<expSeries(1), 512>();
-  measure<expSeries(2), 512>();
-  measure<expSeries(3), 512>();
-  measure<expSeries(4), 512>();
-  measure<expSeries(5), 512>();
-  measure<expSeries(6), 512>();
-  measure<expSeries(7), 512>();
-  measure<expSeries(8), 512>();
-  measure<expSeries(9), 512>();
-  measure<expSeries(10), 512>();
-  measure<expSeries(11), 512>();
-  measure<expSeries(12), 512>();
-  measure<expSeries(13), 512>();
-  measure<expSeries(14), 512>();
-  measure<expSeries(16), 512>();
-  measure<expSeries(17), 512>();
-  measure<expSeries(18), 512>();
-  measure<expSeries(19), 512>();
-  measure<expSeries(20), 512>();
-  measure<expSeries(21), 512>();
-  measure<expSeries(22), 512>();
-  measure<expSeries(23), 512>();
-  measure<expSeries(24), 512>();
-  measure<expSeries(25), 512>();
-  measure<expSeries(26), 512>();
-  measure<expSeries(27), 512>();
-  measure<expSeries(28), 512>();
-  measure<expSeries(29), 512>();
-  measure<expSeries(30), 512>();
-  measure<expSeries(31), 512>();
-  measure<expSeries(32), 512>();
-  measure<expSeries(33), 512>();
-  measure<expSeries(34), 512>();
-  measure<expSeries(35), 512>();
-  measure<expSeries(36), 512>();
-  measure<expSeries(37), 512>();
-  measure<expSeries(38), 512>();
-  measure<expSeries(39), 512>();
-  measure<expSeries(40), 512>();
-  measure<expSeries(41), 512>();
-  measure<expSeries(42), 512>();
-  measure<expSeries(43), 512>();
-  measure<expSeries(44), 512>();
-  measure<expSeries(45), 512>();
-  measure<expSeries(46), 512>();
-  measure<expSeries(47), 512>();
-  measure<expSeries(48), 512>();
-  measure<expSeries(49), 512>();
+  measure<ct*expSeries(1)>(random, run_long);
+  measure<ct*expSeries(5)>(random, run_long);
+  measure<ct*expSeries(9)>(random, run_long);
+  measure<ct*expSeries(13)>(random, run_long);
+  measure<ct*expSeries(18)>(random, run_long);
+  measure<ct*expSeries(22)>(random, run_long);
+  measure<ct*expSeries(26)>(random, run_long);
 }
